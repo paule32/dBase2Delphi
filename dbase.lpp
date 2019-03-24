@@ -1,0 +1,127 @@
+%{
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <ctype.h>
+#include <limits.h>
+#include <sys/types.h>
+
+#include <iostream>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+
+#define YYDEBUG 0
+
+#include "dbase.tab.hh"
+
+enum {
+    T_NUMBER = 4,
+    T_EQUAL = 5,
+};
+
+// Forward declerations ----------------------------------
+void Number();
+void HexaNumber();
+
+extern int yyerror(const char*);
+extern std::string str_localnew;
+
+int is_header = 0;
+int line_no = 1;
+%}
+
+%option noyywrap
+%option caseless
+
+DIGIT       [0-9\.]
+HEXALETTER  [a-fA-F]
+HEXANUMBER  [0][x](({DIGIT}|{HEXALETTER})+)
+NUM         {DIGIT}+
+WS          [ \t\n\r]*
+ID          [a-z_]+[a-zA-Z0-9_]*
+REMS1       ((\/\/.*)|(\&\&.*)|(\/\/.*\n*)|(\&\&.*\n*))*
+REMS2       ((\/\*\*\/)|(\/\*(\n*|.*)\*\/))*
+REMSER      {WS}{REMS1}|{REMS2}{WS}
+
+%x COMMENTS
+%%
+
+"** END HEADER".*     {            is_header = 1; return CMD_HEADER; }
+"** END HEADER".*\n   { ++line_no; is_header = 1; return CMD_HEADER; }
+
+\/\/.*            { BEGIN(INITIAL); }
+\/\/.*\n          { ++line_no; BEGIN(INITIAL); }
+
+\&\&.*            { BEGIN(INITIAL); }
+\&\&.*\n          { ++line_no; BEGIN(INITIAL); }
+
+\*\*-*            { BEGIN(INITIAL); }
+\*\*.*\n          { ++line_no; BEGIN(INITIAL); }
+
+\/\*              { BEGIN(COMMENTS); }
+<COMMENTS>\*\/    { BEGIN(INITIAL); }
+<COMMENTS>\n      { ++line_no; }
+<COMMENTS>.       ;
+
+\.f\.             { return CMD_FALSE; }
+\.t\.             { return CMD_TRUE;  }
+
+if                { return CMD_IF;        }
+else              { return CMD_ELSE;      }
+endif             { return CMD_ENDIF;     }
+
+class             { return CMD_CLASS;     }
+of                { return CMD_OF;        }
+new               { return CMD_NEW;       }
+endclass          { return CMD_ENDCLASS;  }
+private           { return CMD_PRIVATE;   }
+local             { return CMD_LOCAL;     }
+
+create            { printf("cmd: create\n");   return CMD_CREATE;    }
+parameter         { return CMD_PARAMETER; }
+
+"^(.*/)?(?:$|(.+?)(?:(\.[^.]*$)|$))?"  { return FILENAME; }
+
+{NUM}        {     Number(); return CMD_NUMBER; }
+{HEXANUMBER} { HexaNumber(); return CMD_NUMBER; }
+
+{WS}({ID}){WS}[.]{WS}({ID}){WS}\({WS}\){WS} {
+    str_localnew.append("");
+    BEGIN(INITIAL);
+}
+
+{WS}({ID}){WS}[.]{WS}({ID}){WS}\={WS}(\.(f|F|t|T)\.){WS} {
+    printf("%s\n",yytext);
+    BEGIN(INITIAL);
+}
+
+{ID}  {
+    yylval.val_charp = (char *) malloc(strlen(yytext));
+    strcpy(yylval.val_charp,yytext);
+    return CMD_ID;
+}
+
+[(]  { return CMD_OBRACE; }
+[)]  { return CMD_CBRACE; }
+
+[-+*/\,\.\=] {
+    printf("op: %s\n", yytext);
+    return *yytext;
+}
+
+[ \t]*              { }
+[\n]*               { ++line_no; }
+
+<<EOF>>             { return 0; }
+.                   ;
+%%
+
+void Number () {
+    yylval.val_int32 = atol(yytext);
+}
+
+void HexaNumber () {
+    yylval.val_int32 = (unsigned int) strtol(yytext, (char **)NULL, 16);
+}
+

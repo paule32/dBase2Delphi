@@ -1,0 +1,373 @@
+%{
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include <iostream>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+#include <string>
+
+#include <map>
+using namespace std;
+
+extern int line_no;
+extern void yyset_in(FILE*);
+extern void yyset_out(FILE*);
+
+extern FILE* yyin;
+extern FILE* yyout;
+
+extern int is_header;      // ** END HEADER
+       int is_inclass = 0;
+
+std::string str_header;
+std::string str_header_name;
+
+std::string str_localscope;
+std::string str_localnew;
+
+std::string str_classname;
+std::string str_constructor, str_destructor;
+
+int yylex(); 
+int yyerror(const char *p) {
+    printf("error at %d line: %s\n",line_no,p);
+    return 1;
+}
+
+void emit_code(std::string src) { fprintf(yyout,"%s",src.c_str()); }
+
+char *input_file;
+
+std::map<std::string,std::string> classVariable;
+std::map<std::string,std::string> globalScope;
+
+%}
+
+//-- SYMBOL SEMANTIC VALUES -----------------------------
+%union {
+  uint32_t val_int32;
+  char*    val_charp;
+};
+
+%start program
+//-- GRAMMAR RULES ---------------------------------------
+
+%token <val_int32> CMD_NUMBER
+%token <val_charp> CMD_ID
+%token <val_charp> FILENAME
+
+%token CMD_HEADER
+
+%token CMD_IF    CMD_ELSE CMD_ENDIF
+%token CMD_CLASS CMD_OF   CMD_ENDCLASS  CMD_LOCAL CMD_PRIVATE CMD_NEW
+
+%token CMD_FALSE CMD_FT_CMD
+%token CMD_TRUE
+
+%token CMD_DIV CMD_OBRACE CMD_CBRACE
+
+%token CMD_CREATE
+%token CMD_PARAMETER
+
+%type <val_charp> id
+%%
+
+program
+    : stmt_cmds program
+    | /* empty */
+    ;
+
+stmt_cmds
+    : CMD_HEADER {
+        if (is_header) {
+            fprintf(stdout,"is header\n");
+            str_header.clear();
+            str_header.append("function dBHdr");
+            str_header.append(input_file);
+            str_header.append("(");
+
+            str_header_name = "function dBHdr";
+            str_header_name.append(input_file);
+            str_header_name.append("(");
+        }
+    }
+    | CMD_IF { str_localnew.append("\tif ("); } expr {
+               str_localnew.append(" ) then\n\tbegin\n\t");
+    } if_block { printf("25555\n");   } if_else CMD_ENDIF {
+                 printf("endif\n");
+               str_localnew.append("\tend;\n");
+    }
+    | CMD_LOCAL {
+        if (is_header) {
+            str_localscope.append("var\n\t");
+        }
+    } local_list {
+        if (is_header) {
+            str_localscope.append(": TParameter;\n\n");
+        }
+    }
+    | id '=' CMD_NEW id CMD_OBRACE CMD_CBRACE {
+        if (is_header) {
+            str_localnew.append("\tlocal");
+            str_localnew.append(input_file);
+            str_localnew.append($1);
+            str_localnew.append(" = ");
+            str_localnew.append($4);
+            str_localnew.append(".Create;\n");
+        }
+    }
+    | CMD_PARAMETER parameter_list {
+        if (is_header) {
+            str_header_name.append(": TParameter): Boolean;\n");
+
+            str_header.append(": TParameter): Boolean;\n");
+            str_header.append("begin\n");
+        }
+    }
+    | CMD_CLASS id CMD_OF id {
+
+        is_inclass = 1;
+        str_classname = $2;
+
+        std::string str_id = $2;
+        std::string str_of = $4;
+
+        std::string str_va = "dB";
+        str_va.append(str_id);
+
+        std::string str_cl = ": ";
+        str_cl.append(str_id);
+        str_cl.append(";\n\n");
+        classVariable[str_va] = str_cl;
+
+        std::string str;
+        str.append("type\n\t");
+        str.append(str_id);
+        str.append(" = class(");
+        str.append(str_of);
+        str.append(")\n");
+
+        emit_code(str);
+    } class_body CMD_ENDCLASS {
+        std::string str_end = "\tend;\n";
+        emit_code(str_end);
+
+        str_constructor.append("end;\n");
+        str_destructor .append("end;\n");
+    }
+    ;
+
+expr
+    : id {
+        str_localnew.append($1);
+    }
+    | CMD_NUMBER {
+        std::string str = std::to_string($1);
+        str_localnew.append(str);
+    }
+    | expr '+'     expr { str_localnew.append(" + "  ); }
+    | expr '-'     expr { str_localnew.append(" - "  ); }
+    | expr '*'     expr { str_localnew.append(" * "  ); }
+    | expr '/'     expr { str_localnew.append(" div "); }
+    | expr CMD_DIV expr { str_localnew.append(" div "); }
+    | CMD_OBRACE { str_localnew.append("("); } expr
+      CMD_CBRACE { str_localnew.append(")"); }
+    ;
+
+if_block
+    : if_block_stmt if_block
+    | /* empty */
+    ;
+if_else
+    : CMD_ELSE {
+        str_localnew.append("else\n\t\t");
+    }
+    | /* empty */
+    ;
+if_block_stmt
+    : id '.' id CMD_OBRACE CMD_CBRACE {
+printf("iiii\n");
+        str_localnew.append($1); str_localnew.append(".");
+        str_localnew.append($3); str_localnew.append("();\n\t\t");
+    }
+    | id '.' id '=' CMD_FALSE {
+        str_localnew.append($1); str_localnew.append(".");
+        str_localnew.append($3); str_localnew.append(" := false;\n\t\t");
+    }
+    | id '.' id '=' CMD_TRUE {
+        str_localnew.append($1); str_localnew.append(".");
+        str_localnew.append($3); str_localnew.append(" := true;\n\t\t");
+    }
+    ;
+
+local_list
+    : id {
+        if (is_header) {
+            str_localscope.append("local");
+            str_localscope.append(input_file);
+            str_localscope.append($1);
+        }
+    }
+    | local_list ',' {
+        if (is_header) {
+            str_localscope.append(", ");
+        }
+    } local_list
+    ;
+
+parameter_list
+    : id {
+        if (is_header) {
+            str_header_name.append($1);
+            str_header.append($1);
+        }
+    }
+    | parameter_list ',' {
+        if (is_header) {
+            str_header_name.append(", ");
+            str_header.append(", ");
+        }
+    } parameter_list
+    ;
+
+class_body
+    : class_stmt class_body
+    | /* empty */
+    ;
+class_stmt
+    : CMD_PRIVATE { emit_code(std::string("\tprivate\n")); }
+    | CMD_LOCAL   {
+        if (is_inclass) {
+            emit_code("\tpublic\n" );
+            emit_code("\t\tconstructor Create;\n");
+            emit_code("\t\tdestructor  Destroy;\n");
+
+            str_constructor.clear();
+            str_constructor.append("construtor ");
+            str_constructor.append(str_classname);
+            str_constructor.append(".Create;\nbegin\n\tinherited;\n");
+
+            str_destructor .clear();
+            str_destructor .append("destructor ");
+            str_destructor .append(str_classname);
+            str_destructor .append(".Destroy;\nbegin\n\tinherited;\n");
+        }
+    }
+    ;
+
+id  : CMD_ID { $$ = $1; }
+    ;
+
+%%
+//-- FUNCTION DEFINITIONS ---------------------------------
+
+int main(int argc, char **argv)
+{
+    int result = 0;
+    register int is_stdin = 0;
+
+    printf("dbase2delphi (c) 2019 Jens Kallup\n");
+    printf("all rights reserved.\n\n");
+
+    if (argc  < 2) {
+        argc += 1;
+        argv[1] = (char*) malloc(128);
+        strcpy(argv[1],"/dev/stdin");
+        is_stdin = 1;
+    }
+
+    if (!(yyin = fopen(argv[1],"r"))) {
+        fprintf(stderr,"error: can't find input file, use default stdin.\n");
+        yyset_in(stdin);
+    }   yyset_in(yyin);
+
+    char *output = (char *) malloc(strlen(argv[1])+5);
+    strcpy(output,argv[1]);
+    strcat(output,".pas");
+
+    FILE *tout = nullptr;
+    if (!(tout = fopen(output,"w"))) {
+        fprintf(stderr,"error: can't open file to write, try stdout.\n");
+        FILE *tmpout = nullptr;
+        if (!(tmpout = fopen("/dev/stdout","w"))) {
+            free(output);
+            fprintf(stderr,"ERROR\n");
+            fclose(yyin);
+            return 1;
+        }   else {
+            yyset_out(tmpout);
+            goto nextstep;
+        }
+        free(output);
+        return 1;
+    }   else {
+        if (tout == stdout) {
+            yyset_out(stdout); goto nextstep;
+        }   yyset_out(tout);
+    }
+
+nextstep:
+    free(output);
+
+    if (!is_stdin) {
+        input_file = (char *) malloc(strlen(argv[1])); strcpy(input_file,argv[1]);
+        input_file[strlen(input_file) - 4]  = '\0';
+    }   else {
+        input_file = (char *) malloc(128);
+        strcpy(input_file,"untitled");
+    }
+
+    std::string str = "unit ";
+    str.append(input_file);
+    str.append(";\n\ninterface\n\n");
+    str.append("uses\n\tSysUtils, Classes, Controls, Forms,\n\tDialogs, dBase7;\n\n");
+    emit_code(str);
+
+    result = yyparse();
+
+    std::string cv;
+    for (std::map<std::string,std::string>::iterator classIter = classVariable.begin();
+        classIter != classVariable.end();
+        ++classIter) {
+        cv.clear();
+        cv.append("var\n\t");
+        cv.append(classIter->first );
+        cv.append(classIter->second); cv.append("\n");
+        emit_code(cv);
+    }
+
+    emit_code(str_header_name);
+
+    std::string impl = "\nimplementation\n\n";
+    emit_code(impl);
+
+    if (is_header) {
+        emit_code(str_localscope);          // local
+        str_header.append(str_localnew);
+        str_header.append("end;\n\n");
+        emit_code(str_header);
+    }
+
+    str_constructor.append("\n");
+    emit_code(str_constructor);
+
+    str_destructor.append("\n");
+    emit_code(str_destructor);
+
+    if (result < 1) {
+        fprintf(yyout,"end.");
+        fprintf(stdout,"SUCCESS\n");
+    } else {
+        fprintf(stdout,"ERROR\n");
+    }
+
+    free(input_file);
+    fclose(yyin);
+    fclose(yyout);
+    return result;
+}
