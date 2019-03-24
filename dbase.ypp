@@ -14,7 +14,9 @@
 #include <map>
 using namespace std;
 
-extern int line_no;
+extern int line_row;
+extern int line_col;
+
 extern void yyset_in(FILE*);
 extern void yyset_out(FILE*);
 
@@ -30,12 +32,17 @@ std::string str_header_name;
 std::string str_localscope;
 std::string str_localnew;
 
+std::string str_expr;
+std::string str_else;
+
 std::string str_classname;
 std::string str_constructor, str_destructor;
 
 int yylex(); 
 int yyerror(const char *p) {
-    printf("error at %d line: %s\n",line_no,p);
+    printf("error at %d:%d: %s\n",
+        line_row,
+        line_col,p);
     return 1;
 }
 
@@ -96,11 +103,13 @@ stmt_cmds
             str_header_name.append("(");
         }
     }
-    | CMD_IF { str_localnew.append("\tif ("); } expr {
-               str_localnew.append(" ) then\n\tbegin\n\t");
-    } if_block { printf("25555\n");   } if_else CMD_ENDIF {
-                 printf("endif\n");
-               str_localnew.append("\tend;\n");
+    | CMD_IF   { str_localnew.append("\tif (");
+                 str_expr.clear();    } expr {
+                 str_localnew.append(" ) then\n\tbegin\n\t");
+                 str_localnew.append(str_expr);
+                 str_else.clear();    } if_else CMD_ENDIF {
+                 str_localnew.append(str_else);
+                 str_localnew.append("\tend;\n");
     }
     | CMD_LOCAL {
         if (is_header) {
@@ -179,30 +188,11 @@ expr
       CMD_CBRACE { str_localnew.append(")"); }
     ;
 
-if_block
-    : if_block_stmt if_block
-    | /* empty */
-    ;
 if_else
     : CMD_ELSE {
         str_localnew.append("else\n\t\t");
     }
     | /* empty */
-    ;
-if_block_stmt
-    : id '.' id CMD_OBRACE CMD_CBRACE {
-printf("iiii\n");
-        str_localnew.append($1); str_localnew.append(".");
-        str_localnew.append($3); str_localnew.append("();\n\t\t");
-    }
-    | id '.' id '=' CMD_FALSE {
-        str_localnew.append($1); str_localnew.append(".");
-        str_localnew.append($3); str_localnew.append(" := false;\n\t\t");
-    }
-    | id '.' id '=' CMD_TRUE {
-        str_localnew.append($1); str_localnew.append(".");
-        str_localnew.append($3); str_localnew.append(" := true;\n\t\t");
-    }
     ;
 
 local_list

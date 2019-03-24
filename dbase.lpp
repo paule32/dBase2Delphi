@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <string>
+#include <regex>
 
 #define YYDEBUG 0
 
@@ -24,11 +26,18 @@ enum {
 void Number();
 void HexaNumber();
 
+void count(void);
+
 extern int yyerror(const char*);
+
 extern std::string str_localnew;
+extern std::string str_expr;
+extern std::string str_else;
 
 int is_header = 0;
-int line_no = 1;
+
+int line_row  = 1;
+int line_col  = 1;
 %}
 
 %option noyywrap
@@ -47,71 +56,128 @@ REMSER      {WS}{REMS1}|{REMS2}{WS}
 %x COMMENTS
 %%
 
-"** END HEADER".*     {            is_header = 1; return CMD_HEADER; }
-"** END HEADER".*\n   { ++line_no; is_header = 1; return CMD_HEADER; }
+"** END HEADER"(.*|.*\n) { count(); is_header = 1; return CMD_HEADER; }
 
-\/\/.*            { BEGIN(INITIAL); }
-\/\/.*\n          { ++line_no; BEGIN(INITIAL); }
+\/\/(.*|.*\n)     { count(); BEGIN(INITIAL); }
+\&\&(.*|.*\n)     { count(); BEGIN(INITIAL); }
+\*\*(.*|.*\n)     { count(); BEGIN(INITIAL); }
 
-\&\&.*            { BEGIN(INITIAL); }
-\&\&.*\n          { ++line_no; BEGIN(INITIAL); }
+\/\*              { count(); BEGIN(COMMENTS); }
+<COMMENTS>\*\/    { count(); BEGIN(INITIAL);  }
+<COMMENTS>\n      { count(); }
+<COMMENTS>.       { count(); }
 
-\*\*-*            { BEGIN(INITIAL); }
-\*\*.*\n          { ++line_no; BEGIN(INITIAL); }
+\.f\.             { count(); return CMD_FALSE; }
+\.t\.             { count(); return CMD_TRUE;  }
 
-\/\*              { BEGIN(COMMENTS); }
-<COMMENTS>\*\/    { BEGIN(INITIAL); }
-<COMMENTS>\n      { ++line_no; }
-<COMMENTS>.       ;
+if                { count(); return CMD_IF;        }
+else              { count(); return CMD_ELSE;      }
+endif             { count(); return CMD_ENDIF;     }
 
-\.f\.             { return CMD_FALSE; }
-\.t\.             { return CMD_TRUE;  }
+class             { count(); return CMD_CLASS;     }
+of                { count(); return CMD_OF;        }
+new               { count(); return CMD_NEW;       }
+endclass          { count(); return CMD_ENDCLASS;  }
+private           { count(); return CMD_PRIVATE;   }
+local             { count(); return CMD_LOCAL;     }
 
-if                { return CMD_IF;        }
-else              { return CMD_ELSE;      }
-endif             { return CMD_ENDIF;     }
+create            { count(); return CMD_CREATE;    }
+parameter         { count(); return CMD_PARAMETER; }
 
-class             { return CMD_CLASS;     }
-of                { return CMD_OF;        }
-new               { return CMD_NEW;       }
-endclass          { return CMD_ENDCLASS;  }
-private           { return CMD_PRIVATE;   }
-local             { return CMD_LOCAL;     }
+"^(.*/)?(?:$|(.+?)(?:(\.[^.]*$)|$))?"  { count(); return FILENAME; }
 
-create            { printf("cmd: create\n");   return CMD_CREATE;    }
-parameter         { return CMD_PARAMETER; }
-
-"^(.*/)?(?:$|(.+?)(?:(\.[^.]*$)|$))?"  { return FILENAME; }
-
-{NUM}        {     Number(); return CMD_NUMBER; }
-{HEXANUMBER} { HexaNumber(); return CMD_NUMBER; }
+{NUM}        { count();     Number(); return CMD_NUMBER; }
+{HEXANUMBER} { count(); HexaNumber(); return CMD_NUMBER; }
 
 {WS}({ID}){WS}[.]{WS}({ID}){WS}\({WS}\){WS} {
-    str_localnew.append("");
+    count();
+    const  char srex[] =
+    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)"
+    "[ \\t\\n]*\\."
+    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)"
+    "[ \\t\\n]*\\("
+    "[ \\t\\n]*\\)"
+    "[ \\t\\n]*";
+
+    std::string cstr   = yytext;
+    std::regex  crex(srex);
+    std::smatch smatch ;
+
+    std::regex_match(cstr,smatch,crex);
+    std::ssub_match id1 = smatch[1];
+    std::ssub_match id2 = smatch[2];
+
+    std::string str_id1 = id1.str();
+    std::string str_id2 = id2.str();
+
+    str_expr.append(id1); str_expr.append(".");
+    str_expr.append(id2); str_expr.append("();\n\t");
+    //
+    str_else.append(id1); str_else.append(".");
+    str_else.append(id2); str_else.append("();\n\t");
+
+#if 0
+    std::cout << "match1: " << str_id1 << std::endl;
+    std::cout << "match2: " << str_id2 << std::endl;
+#endif
+
     BEGIN(INITIAL);
 }
 
 {WS}({ID}){WS}[.]{WS}({ID}){WS}\={WS}(\.(f|F|t|T)\.){WS} {
-    printf("%s\n",yytext);
+    count();
+    const  char srex[] =
+    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)[ \\t\\n]*[.]"
+    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)[ \\t\\n]*\\="
+    "[ \\t\\n]*(\\.(f|F|t|T)\\.)"
+    "[ \\t\\n]*";
+
+    std::string cstr = yytext;
+    std::regex  crex(srex);
+    std::smatch smatch;
+
+    std::regex_match(cstr,smatch,crex);
+    std::ssub_match id1 = smatch[1];
+    std::ssub_match id2 = smatch[2];
+    std::ssub_match id3 = smatch[3];
+
+    std::string str_id1 = id1.str();
+    std::string str_id2 = id2.str();
+    std::string str_id3 = id3.str();
+
+    str_expr.append(id1); str_expr.append(".");
+    str_expr.append(id2);
+
+    if ((str_id3 == ".f.") || (str_id3 == ".F.")) str_expr.append(" := false;\n\t"); else
+    if ((str_id3 == ".t.") || (str_id3 == ".T.")) str_expr.append(" := true; \n\t");
+
+#if 0
+    std::cout << "match1: " << str_id1 << std::endl;
+    std::cout << "match2: " << str_id2 << std::endl;
+    std::cout << "match3: " << str_id3 << std::endl;
+#endif
+
     BEGIN(INITIAL);
 }
 
 {ID}  {
+    count();
     yylval.val_charp = (char *) malloc(strlen(yytext));
     strcpy(yylval.val_charp,yytext);
     return CMD_ID;
 }
 
-[(]  { return CMD_OBRACE; }
-[)]  { return CMD_CBRACE; }
+[(]  { count(); return CMD_OBRACE; }
+[)]  { count(); return CMD_CBRACE; }
 
 [-+*/\,\.\=] {
+    count();
     printf("op: %s\n", yytext);
     return *yytext;
 }
 
-[ \t]*              { }
-[\n]*               { ++line_no; }
+[ \t]*              { count(); }
+[\n]*               { count(); }
 
 <<EOF>>             { return 0; }
 .                   ;
@@ -123,5 +189,14 @@ void Number () {
 
 void HexaNumber () {
     yylval.val_int32 = (unsigned int) strtol(yytext, (char **)NULL, 16);
+}
+
+void count(void)
+{
+    int i;
+    for (i = 0; yytext[i] != '\0'; i++) {
+	    if (yytext[i] == '\n')  { line_col  = 0; ++line_row; } else
+	    if (yytext[i] == '\t')  { line_col += 8;             } else line_col++;
+    }
 }
 
