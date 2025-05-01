@@ -1,0 +1,6 @@
+*.bak
+packed.zip
+*.o
+dbase2fpc.exe
+*.ppu
+1

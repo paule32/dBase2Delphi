@@ -1,6 +1,12 @@
 #!/bin/sh
 
-flex  -o dbase.lex.cc -l  dbase.lpp
-bison -o dbase.tab.cc -vd dbase.ypp
 
-g++ -D_GLIBCXX_USE_CXX11_ABI=0 -std=c++14 -o dbase2delphi dbase.lex.cc dbase.tab.cc -lfl -ly
+flex  -o dbase.lex.cc -l  dbase.lpp
+bison -o dbase.tab.cc \
+    -Wno-conflicts-sr \
+    -Wno-conflicts-rr \
+    -Wno-other        \
+    -vd dbase.ypp
+
+g++ -O2 -std=c++20 -o dbase2fpc dbase.lex.cc dbase.tab.cc -lole32
+strip dbase2fpc.exe

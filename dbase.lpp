@@ -1,4 +1,25 @@
 %{
+// ---------------------------------------------------------------------------------------
+// Copyright(c) 2025 Jens Kallup
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files(the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify,
+// merge, publish, distribute, sublicense, and /or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to the following
+// conditions :
+// 
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// ---------------------------------------------------------------------------------------
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -12,17 +33,13 @@
 #include <cstdint>
 #include <string>
 #include <regex>
+#include <exception>
 
 #define YYDEBUG 0
 
 #include "dbase.tab.hh"
 
-enum {
-    T_NUMBER = 4,
-    T_EQUAL = 5,
-};
-
-// Forward declerations ----------------------------------
+//-- Forward declerations ----------------------------------
 void Number();
 void HexaNumber();
 
@@ -30,11 +47,9 @@ void count(void);
 
 extern int yyerror(const char*);
 
-extern std::string str_localnew;
-extern std::string str_expr;
-extern std::string str_else;
+//-- Compiler declerations ---------------------------------
+bool found_header = false;
 
-int is_header = 0;
 
 int line_row  = 1;
 int line_col  = 1;
@@ -43,141 +58,121 @@ int line_col  = 1;
 %option noyywrap
 %option caseless
 
-DIGIT       [0-9\.]
-HEXALETTER  [a-fA-F]
-HEXANUMBER  [0][x](({DIGIT}|{HEXALETTER})+)
-NUM         {DIGIT}+
-WS          [ \t\n\r]*
-ID          [a-z_]+[a-zA-Z0-9_]*
-REMS1       ((\/\/.*)|(\&\&.*)|(\/\/.*\n*)|(\&\&.*\n*))*
-REMS2       ((\/\*\*\/)|(\/\*(\n*|.*)\*\/))*
-REMSER      {WS}{REMS1}|{REMS2}{WS}
+DOUBLE_DIGIT [0-9]+\.[0-9]+
+DIGIT        [0-9]+
+HEXALETTER   [a-fA-F]
+HEXANUMBER   [0][x](({DIGIT}|{HEXALETTER})+)
+NUM          {DIGIT}+
+WS           [ \t\n\r]*
+ID           [a-z_]+[a-zA-Z0-9_]*
+REMS1        ((\/\/.*)|(\&\&.*)|(\/\/.*\n*)|(\&\&.*\n*))*
+REMS2        ((\/\*\*\/)|(\/\*(\n*|.*)\*\/))*
+REMSER       {WS}{REMS1}|{REMS2}{WS}
 
-%x COMMENTS
+%x COMMENTS HEADER
 %%
-
-"** END HEADER"(.*|.*\n) { count(); is_header = 1; return CMD_HEADER; }
 
 \/\/(.*|.*\n)     { count(); BEGIN(INITIAL); }
 \&\&(.*|.*\n)     { count(); BEGIN(INITIAL); }
-\*\*(.*|.*\n)     { count(); BEGIN(INITIAL); }
+\*\*              { count(); BEGIN(HEADER);  }
 
 \/\*              { count(); BEGIN(COMMENTS); }
 <COMMENTS>\*\/    { count(); BEGIN(INITIAL);  }
 <COMMENTS>\n      { count(); }
 <COMMENTS>.       { count(); }
 
-\.f\.             { count(); return CMD_FALSE; }
-\.t\.             { count(); return CMD_TRUE;  }
+<HEADER>\s*"END HEADER"  { count();
+  if (found_header)
+  yyerror("header marker already exists.");
+  
+  std::cout << "header found" <<
+  std::endl ;
+  
+  found_header = true;
+}
+<HEADER>\n               { count(); BEGIN(INITIAL); }
+<HEADER>.                { count(); }
 
-if                { count(); return CMD_IF;        }
-else              { count(); return CMD_ELSE;      }
-endif             { count(); return CMD_ENDIF;     }
+\.      { count(); yylval.str = new std::string("."  );  return '.'; }
+\,      { count(); yylval.str = new std::string(","  );  return ','; }
 
-class             { count(); return CMD_CLASS;     }
-of                { count(); return CMD_OF;        }
-new               { count(); return CMD_NEW;       }
-endclass          { count(); return CMD_ENDCLASS;  }
-private           { count(); return CMD_PRIVATE;   }
-local             { count(); return CMD_LOCAL;     }
+\=      { std::cout << "================" << std::endl; count(); yylval.str = new std::string("= " );  return CMD_ASSIGN; }
+\:\=    { count(); yylval.str = new std::string(":= ");  return CMD_ASSIGN; }
 
-create            { count(); return CMD_CREATE;    }
-parameter         { count(); return CMD_PARAMETER; }
+"'"([^'\\]|\\.)*"'"      {
+    yylval.str = new std::string(yytext + 1, yyleng - 2);
+    return CMD_SQSTRING;
+}
 
+\"([^"\\]|\\.)*\"        {
+    yylval.str = new std::string(yytext + 1, yyleng - 2);
+    return CMD_DQSTRING;
+}
+
+\[([^\\\]]|\\.|[\n])*?\] {
+    std::string raw(yytext);
+    yylval.str = new std::string(raw.substr(1, raw.length() - 2));
+    return CMD_BLOCKSTRING;
+}
+                          
 "^(.*/)?(?:$|(.+?)(?:(\.[^.]*$)|$))?"  { count(); return FILENAME; }
 
-{NUM}        { count();     Number(); return CMD_NUMBER; }
-{HEXANUMBER} { count(); HexaNumber(); return CMD_NUMBER; }
-
-{WS}({ID}){WS}[.]{WS}({ID}){WS}\({WS}\){WS} {
-    count();
-    const  char srex[] =
-    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)"
-    "[ \\t\\n]*\\."
-    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)"
-    "[ \\t\\n]*\\("
-    "[ \\t\\n]*\\)"
-    "[ \\t\\n]*";
-
-    std::string cstr   = yytext;
-    std::regex  crex(srex);
-    std::smatch smatch ;
-
-    std::regex_match(cstr,smatch,crex);
-    std::ssub_match id1 = smatch[1];
-    std::ssub_match id2 = smatch[2];
-
-    std::string str_id1 = id1.str();
-    std::string str_id2 = id2.str();
-
-    str_expr.append(id1); str_expr.append(".");
-    str_expr.append(id2); str_expr.append("();\n\t");
-    //
-    str_else.append(id1); str_else.append(".");
-    str_else.append(id2); str_else.append("();\n\t");
-
-#if 0
-    std::cout << "match1: " << str_id1 << std::endl;
-    std::cout << "match2: " << str_id2 << std::endl;
-#endif
-
-    BEGIN(INITIAL);
-}
-
-{WS}({ID}){WS}[.]{WS}({ID}){WS}\={WS}(\.(f|F|t|T)\.){WS} {
-    count();
-    const  char srex[] =
-    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)[ \\t\\n]*[.]"
-    "[ \\t\\n]*([a-zA-Z_]+[a-zA-Z0-9_]*)[ \\t\\n]*\\="
-    "[ \\t\\n]*(\\.(f|F|t|T)\\.)"
-    "[ \\t\\n]*";
-
-    std::string cstr = yytext;
-    std::regex  crex(srex);
-    std::smatch smatch;
-
-    std::regex_match(cstr,smatch,crex);
-    std::ssub_match id1 = smatch[1];
-    std::ssub_match id2 = smatch[2];
-    std::ssub_match id3 = smatch[3];
-
-    std::string str_id1 = id1.str();
-    std::string str_id2 = id2.str();
-    std::string str_id3 = id3.str();
-
-    str_expr.append(id1); str_expr.append(".");
-    str_expr.append(id2);
-
-    if ((str_id3 == ".f.") || (str_id3 == ".F.")) str_expr.append(" := false;\n\t"); else
-    if ((str_id3 == ".t.") || (str_id3 == ".T.")) str_expr.append(" := true; \n\t");
-
-#if 0
-    std::cout << "match1: " << str_id1 << std::endl;
-    std::cout << "match2: " << str_id2 << std::endl;
-    std::cout << "match3: " << str_id3 << std::endl;
-#endif
-
-    BEGIN(INITIAL);
-}
+{DOUBLE_DIGIT}  { std::cout << "double ---------------  " << yytext << std::endl; count();     Number(); return CMD_NUMBER; }
+{NUM}           { count();     Number(); return CMD_NUMBER; }
+{HEXANUMBER}    { count(); HexaNumber(); return CMD_NUMBER; }
 
 {ID}  {
+std::cout << yytext << std::endl;
+    std::string upper = yytext;
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    
     count();
-    yylval.val_charp = (char *) malloc(strlen(yytext));
-    strcpy(yylval.val_charp,yytext);
+    yylval.str = new std::string(yytext); 
+    
+    if (upper == "PARAMETER")   { return CMD_PARAMETER; }
+    if (upper == "LOCAL")       { return CMD_LOCAL;     }
+    
+    if (upper == "IF")          { return CMD_IF;        }
+    if (upper == "ELSE")        { return CMD_ELSE;      }
+    if (upper == "ENDIF")       { return CMD_ENDIF;     }
+    
+    if (upper == "PUBLIC")      { return CMD_PUBLIC;    }
+    if (upper == "PRIVATE")     { return CMD_PRIVATE;   }
+    if (upper == "PROTECTED")   { return CMD_PROTECTED; }
+    
+    if (upper == "WITH")        { return CMD_WITH;      }
+    if (upper == "ENDWITH")     { return CMD_ENDWITH;   }
+    
+    if (upper == "NEW")         { return CMD_NEW;       }
+    if (upper == "CLASS")       { return CMD_CLASS;     }
+    if (upper == "OF")          { return CMD_OF;        }
+    if (upper == "ENDCLASS")    { return CMD_ENDCLASS;  }
+    
+    if (upper == "FORM")        { return CMD_FORM;      }
+    
     return CMD_ID;
 }
 
-[(]  { count(); return CMD_OBRACE; }
-[)]  { count(); return CMD_CBRACE; }
+"!="    { count(); yylval.str = new std::string("!="); return CMD_NE;   }
+"=>"    { count(); yylval.str = new std::string("=>"); return CMD_EG;   }
+"=<"    { count(); yylval.str = new std::string("=<"); return CMD_EL;   }
+"=="    { count(); yylval.str = new std::string("=="); return CMD_EQ;   }
+">="    { count(); yylval.str = new std::string(">="); return CMD_GE;   }
+"<="    { count(); yylval.str = new std::string("<="); return CMD_LE;   }
 
-[-+*/\,\.\=] {
-    count();
-    printf("op: %s\n", yytext);
-    return *yytext;
-}
+[>]     { count(); yylval.str = new std::string(">");  return CMD_GT;   }
+[<]     { count(); yylval.str = new std::string("<");  return CMD_LT;   }
 
-[ \t]*              { count(); }
-[\n]*               { count(); }
+[+]     { count(); yylval.str = new std::string("+");  return '+';      }
+[-]     { count(); yylval.str = new std::string("-");  return '-';      }
+[*]     { count(); yylval.str = new std::string("*");  return '*';      }
+[/]     { count(); yylval.str = new std::string("/");  return '/';      }
+
+[(]     { count(); yylval.str = new std::string("(");  return '(';      }
+[)]     { count(); yylval.str = new std::string(")");  return ')';      }
+
+[ \t]               { count(); }
+[\r\n|\n]           { count(); }
 
 <<EOF>>             { return 0; }
 .                   ;
@@ -185,6 +180,7 @@ parameter         { count(); return CMD_PARAMETER; }
 
 void Number () {
     yylval.val_int32 = atol(yytext);
+    yylval.str = new std::string(yytext); 
 }
 
 void HexaNumber () {

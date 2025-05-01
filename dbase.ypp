@@ -1,19 +1,49 @@
 %{
-#include <stdio.h>
+// ---------------------------------------------------------------------------------------
+// Copyright(c) 2025 Jens Kallup
+// 
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files(the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify,
+// merge, publish, distribute, sublicense, and /or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to the following
+// conditions :
+// 
+// The above copyright notice and this permission notice shall be included in all copies
+// or substantial portions of the Software.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+// OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// ---------------------------------------------------------------------------------------
+
+#include <windows.h>
+#include <objbase.h>    // CoCreateGuid, GUID
+
+#include <stdio.h>      // classical functions
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/types.h>
 
 #include <iostream>
+#include <iomanip>
 #include <cstring>
-#include <cstdlib>
+#include <cstdlib>      // for atexit and exit
 #include <cstdint>
+#include <cctype>
+#include <sstream>
 #include <string>
+#include <algorithm>
+#include <memory>
 
 #include <map>
-using namespace std;
+#include <vector>
 
+//-- PARSER INPUT / OUTPUT -------------------------------
 extern int line_row;
 extern int line_col;
 
@@ -23,341 +53,784 @@ extern void yyset_out(FILE*);
 extern FILE* yyin;
 extern FILE* yyout;
 
-extern int is_header;      // ** END HEADER
-       int is_inclass = 0;
-
-std::string str_header;
-std::string str_header_name;
-
-std::string str_localscope;
-std::string str_localnew;
-
-std::string str_expr;
-std::string str_else;
-
-std::string str_classname;
-std::string str_constructor, str_destructor;
-
 int yylex(); 
 int yyerror(const char *p) {
     printf("error at %d:%d: %s\n",
         line_row,
-        line_col,p);
-    return 1;
+        line_col + 1,p);
+    exit(1);
 }
 
-void emit_code(std::string src) { fprintf(yyout,"%s",src.c_str()); }
+//-- FORWARD DECLARATIONS ---------------------------------
+std::string repeat(const std::string& str, int n);
+std::string* result = nullptr;
 
-char *input_file;
+int scope_level = 0;
+int indent = 1;
+std::string get_indent() {
+    return std::string(indent * 2, ' ');
+}
 
-std::map<std::string,std::string> classVariable;
-std::map<std::string,std::string> globalScope;
+// --------------------------------------------------------
+// GENERATE GUID STRING FOR HASHING
+// --------------------------------------------------------
+std::string GenerateGUID(void)
+{
+    std::stringstream str;
+    GUID guid;
+    HRESULT hr = CoCreateGuid(&guid);
+    
+    if (SUCCEEDED(hr)) {
+        str << std::setw(8) << std::setfill('0') << std::hex << static_cast< int >( guid.Data1 ) << "_"
+            << std::setw(4) << std::setfill('0') << std::hex << static_cast< int >( guid.Data2 ) << "_"
+            << std::setw(4) << std::setfill('0') << std::hex << static_cast< int >( guid.Data3 ) << "_"
+            ;
+            
+        for (int idx = 0; idx < 8; idx++) {
+            if (idx == 2)
+            str << "_";
+            str << std::setw(2)
+                << std::setfill('0')
+                << std::hex
+                << static_cast<int>(guid.Data4[idx]);
+        }
+    }   else {
+        str << "<empty>";
+    }
+    
+    return str.str();
+}
 
+// --------------------------------------------------------
+// PARSE with (this) ...
+// --------------------------------------------------------
+bool parseThis(const std::string& input, std::string& this_part) {
+    std::string upper = input;
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    if (upper == "THIS") {
+        this_part = "self";
+        return true;
+    }   return false;
+}
+
+//-- EXPRESSION HANDLING ---------------------------------
+std::vector<std::stringstream> term_stream(10);
+int32_t term_count = 0;
+
+static char buffer32_1[32];
+static char buffer32_2[32];
+
+void term_add(uint32_t num) {
+    ltoa(num, buffer32_1, 10);
+    term_stream[0] << buffer32_1;
+}
+
+//-- INTERNAL STRUCTURES ---------------------------------
+enum class ParamType {
+    PT_UNKNOWN = 0,
+    PT_NUMERIC = 1,
+    PT_STRING  = 2,
+    PT_OBJECT  = 3
+};
+enum class ParamScope {
+    PS_UNKNOWN = 0,
+    PS_GLOBAL  = 1,
+    PS_LOCAL   = 2,
+    PS_PRIVATE = 3
+};
+struct DB_Parameter {
+    ParamScope scope;  // global, local, private
+    ParamType   type;
+    //---------------
+    int         size;
+    std::string data;
+};
+std::map<std::string, std::vector< DB_Parameter >> parameters;
+
+std::map<std::string, std::string> classes;
+std::map<std::string, std::string> classes_guid;
+
+std::vector<std::string> class_vector;
 %}
 
-//-- SYMBOL SEMANTIC VALUES -----------------------------
+//-- SYMBOL SEMANTIC VALUES ------------------------------
 %union {
-  uint32_t val_int32;
-  char*    val_charp;
+  uint32_t      val_int32   ;
+  char*         val_charp   ;
+  char*         val_keyword ;
+  std::string * str         ;
 };
 
 %start program
 //-- GRAMMAR RULES ---------------------------------------
 
-%token <val_int32> CMD_NUMBER
-%token <val_charp> CMD_ID
-%token <val_charp> FILENAME
+%token <str> CMD_NUMBER
+%token <str> CMD_ID
 
-%token CMD_HEADER
+%token <str> CMD_ASSIGN
 
-%token CMD_IF    CMD_ELSE CMD_ENDIF
-%token CMD_CLASS CMD_OF   CMD_ENDCLASS  CMD_LOCAL CMD_PRIVATE CMD_NEW
+%token <str> CMD_IF
+%token <str> CMD_ELSE
+%token <str> CMD_ENDIF
 
-%token CMD_FALSE CMD_FT_CMD
-%token CMD_TRUE
+%token <str> CMD_NE CMD_EQ CMD_GT CMD_LT
+%token <str> CMD_EG CMD_EL CMD_GE CMD_LE
 
-%token CMD_DIV CMD_OBRACE CMD_CBRACE
+%token <val_keyword> CMD_PARAMETER
+%token <val_keyword> CMD_LOCAL
+%token <val_keyword> CMD_PUBLIC
+%token <val_keyword> CMD_PRIVATE
+%token <val_keyword> CMD_PROTECTED
 
-%token CMD_CREATE
-%token CMD_PARAMETER
+%token <str> CMD_SQSTRING
+%token <str> CMD_DQSTRING
+%token <str> CMD_BLOCKSTRING
 
-%type <val_charp> id
+%token <str> CMD_NEW
+%token <str> CMD_OF
+%token <str> CMD_FORM
+
+%token <str> CMD_WITH
+%token <str> CMD_ENDWITH
+
+%token <str> CMD_CLASS
+%token <str> CMD_ENDCLASS
+
+%type <str>  string_literal value
+
+%token <str> FILENAME
+
+%type  <str> parameter
+
+%type  <str> qualified_access
+%type  <str> qualified_id
+%type  <str> access_tail
+
+%type  <str> class_command
+%type  <str> class_cmds
+
+%type  <str> if_stmt
+%type  <str> if_tail
+%type  <str> else_part
+
+%type  <str> expr
+%type  <str> expr_string
+%type  <str> expr_list
+
+%type  <str> ident_name
+
+%type  <str> stmt_block
+%type  <str> stmt path_tail
+%type  <str> stmt_list
+
+%type  <str> with_statement
+%type  <str> with_block
+%type  <str> with_element
+
+%type  <str> class_def
+%type  <str> form_optional
+
+%left CMD_EQ CMD_NE CMD_GE CMD_LE CMD_GT CMD_LT
+
+%left '+' '-'     // binäre Addition/Subtraktion
+%left '*' '/'     // binäre Multiplikation/Division
+
+%right UMINUS     // unäres Minus hat höhere Priorität
+%right UPLUS      // unäres Plus optional
+
 %%
 
 program
-    : stmt_cmds program
-    | /* empty */
+    :   stmt_list {
+        result = $1;
+    }
     ;
 
-stmt_cmds
-    : CMD_HEADER {
-        if (is_header) {
-            fprintf(stdout,"is header\n");
-            str_header.clear();
-            str_header.append("function dBHdr");
-            str_header.append(input_file);
-            str_header.append("(");
+stmt
+    :   if_stmt
+    |   class_list
+    ;
 
-            str_header_name = "function dBHdr";
-            str_header_name.append(input_file);
-            str_header_name.append("(");
-        }
+class_list
+    :   class_list class_element
+    |   class_element
+    ;
+
+stmt_list
+    :   stmt_list stmt {
+        *$1 += *$2;
+        $$ = $1;
+        delete $2;
     }
-    | CMD_IF   { str_localnew.append("\tif (");
-                 str_expr.clear();    } expr {
-                 str_localnew.append(" ) then\n\tbegin\n\t");
-                 str_localnew.append(str_expr);
-                 str_else.clear();    } if_else CMD_ENDIF {
-                 str_localnew.append(str_else);
-                 str_localnew.append("\tend;\n");
+    |   stmt {
+        $$ = $1;
     }
-    | CMD_LOCAL {
-        if (is_header) {
-            str_localscope.append("var\n\t");
-        }
-    } local_list {
-        if (is_header) {
-            str_localscope.append(": TParameter;\n\n");
-        }
+    ;
+
+expr_string
+    :   CMD_SQSTRING {
+        $$ = new std::string(*$1);
     }
-    | id '=' CMD_NEW id CMD_OBRACE CMD_CBRACE {
-        if (is_header) {
-            str_localnew.append("\tlocal");
-            str_localnew.append(input_file);
-            str_localnew.append($1);
-            str_localnew.append(" = ");
-            str_localnew.append($4);
-            str_localnew.append(".Create;\n");
-        }
+    |   CMD_DQSTRING {
+        $$ = new std::string(*$1);
     }
-    | CMD_PARAMETER parameter_list {
-        if (is_header) {
-            str_header_name.append(": TParameter): Boolean;\n");
-
-            str_header.append(": TParameter): Boolean;\n");
-            str_header.append("begin\n");
-        }
+    |   CMD_BLOCKSTRING {
+        $$ = new std::string(*$1);
     }
-    | CMD_CLASS id CMD_OF id {
+    ;
 
-        is_inclass = 1;
-        str_classname = $2;
+if_stmt
+    :   CMD_IF expr stmt_block else_part CMD_ENDIF {
+        indent--;
+        term_stream[3] << get_indent() << "IF ("  << *$2 << ") THEN" <<
+        std::endl      << get_indent() << "BEGIN" <<
+        std::endl      ;
+        term_stream[3] << get_indent() << *$3;
+        if (!$4->empty()) {
+            term_stream[3] << get_indent() << "ELSE"  <<
+            std::endl      << get_indent() << "BEGIN" <<
+            std::endl      ;
+            term_stream[3] << get_indent() << *$4     <<
+            std::endl;
+        }
+        term_stream[3] << "end;"     <<
+        std::endl;
+        
+        delete $2;
+        delete $3;
+        delete $4;
+    }
+    ;
 
-        std::string str_id = $2;
-        std::string str_of = $4;
+else_part
+    :   CMD_ELSE stmt_block {
+        $$ = $2;
+    }
+    |   /* empty */ {
+        $$ = new std::string("");
+    }
+    ;
 
-        std::string str_va = "dB";
-        str_va.append(str_id);
+if_tail
+    :   CMD_ENDIF {
+        std::ostringstream* out = new std::ostringstream;
+        *out << get_indent() << "END;\n";
+        $$ = new std::string(out->str());
+        delete out;
+    }
+    |   CMD_ELSE stmt_block CMD_ENDIF {
+        std::ostringstream* out = new std::ostringstream;
+        *out << get_indent() << "ELSE\n";
+        *out << *$2;
+        *out << get_indent() << "END;\n";
+        $$ = new std::string(out->str());
+        delete out;
+        delete $2;
+    }
+    ;
 
-        std::string str_cl = ": ";
-        str_cl.append(str_id);
-        str_cl.append(";\n\n");
-        classVariable[str_va] = str_cl;
-
-        std::string str;
-        str.append("type\n\t");
-        str.append(str_id);
-        str.append(" = class(");
-        str.append(str_of);
-        str.append(")\n");
-
-        emit_code(str);
-    } class_body CMD_ENDCLASS {
-        std::string str_end = "\tend;\n";
-        emit_code(str_end);
-
-        str_constructor.append("end;\n");
-        str_destructor .append("end;\n");
+stmt_block
+    :   stmt_list {
+        $$ = $1;
+    }
+    |   /* empty */ {
+        $$ = new std::string("");
     }
     ;
 
 expr
-    : id {
-        str_localnew.append($1);
+    :   CMD_NUMBER       { $$ = new std::string(*$1); delete $1; }
+    |   qualified_access { $$ = new std::string(*$1); delete $1; }
+    |   string_literal   { $$ = new std::string(*$1); delete $1;
     }
-    | CMD_NUMBER {
-        std::string str = std::to_string($1);
-        str_localnew.append(str);
+    |   '(' expr ')'          {
+        $$ = new std::string("(" + *$2 + ")");
+        delete $2;
     }
-    | expr '+'     expr { str_localnew.append(" + "  ); }
-    | expr '-'     expr { str_localnew.append(" - "  ); }
-    | expr '*'     expr { str_localnew.append(" * "  ); }
-    | expr '/'     expr { str_localnew.append(" div "); }
-    | expr CMD_DIV expr { str_localnew.append(" div "); }
-    | CMD_OBRACE { str_localnew.append("("); } expr
-      CMD_CBRACE { str_localnew.append(")"); }
+    |   expr '+' expr {
+        $$ = new std::string("(" + *$1 + " + " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr '-' expr {
+        $$ = new std::string("(" + *$1 + " - " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr '*' expr {
+        $$ = new std::string("(" + *$1 + " * " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr '/' expr {
+        $$ = new std::string("(" + *$1 + " / " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }   
+    |   expr CMD_EQ expr {
+        $$ = new std::string("(" + *$1 + " == " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_NE expr {
+        $$ = new std::string("(" + *$1 + " != " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_GE expr {
+        $$ = new std::string("(" + *$1 + " >= " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_LE expr {
+        $$ = new std::string("(" + *$1 + " <= " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_EG expr {
+        $$ = new std::string("(" + *$1 + " => " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_EL expr {
+        $$ = new std::string("(" + *$1 + " =< " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_GT expr {
+        $$ = new std::string("(" + *$1 + " > " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   expr CMD_LT expr {
+        $$ = new std::string("(" + *$1 + " < " + *$3 + ")");
+        delete $1;
+        delete $3;
+    }
+    |   '-' expr %prec UMINUS { $$ = new std::string("-" + *$2); }
+    |   '+' expr %prec UPLUS  { $$ = new std::string("+" + *$2); }
     ;
 
-if_else
-    : CMD_ELSE {
-        str_localnew.append("else\n\t\t");
-    }
-    | /* empty */
+string_literal
+    :   CMD_SQSTRING
+    |   CMD_DQSTRING
     ;
 
-local_list
-    : id {
-        if (is_header) {
-            str_localscope.append("local");
-            str_localscope.append(input_file);
-            str_localscope.append($1);
+value
+    :   string_literal
+    |   CMD_NUMBER
+    |   qualified_access
+    ;
+
+ident_name
+    :   CMD_ID {
+        $$ = new std::string(*$1);
+        delete $1;
+    }
+    |   ident_name '.' CMD_ID {
+        *$1 += "." + *$3;
+        $$ = $1;
+        delete $3;
+    }
+    ;
+
+class_element
+    :   class_def
+    |   with_statement
+    ;
+
+class_def
+    :   CMD_CLASS CMD_ID CMD_OF CMD_FORM form_optional {
+        //indent--;
+        //if (indent < 1)
+        //term_stream[0] << get_indent() << "end;" <<
+        //std::endl ;  else
+        //term_stream[1] << get_indent() << "type" <<
+        //std::endl ;
+        //indent++;
+        term_stream[1] << "type" << std::endl;
+        term_stream[1] << get_indent() << *$2 << " = class(TForm)" <<
+        std::endl << get_indent() << "public" <<
+        std::endl ;
+        indent++;
+        term_stream[1] << get_indent() << "constructor Create;" <<
+        std::endl      << get_indent() << "destructor Destroy;" <<
+        std::endl      ;
+        indent--;
+        term_stream[1] << get_indent() << "end;" << std::endl;
+        
+        term_stream[2] <<
+        std::endl      << "destructor " << *$2 << ".Destroy;" <<
+        std::endl      << "begin" <<
+        std::endl      << "  inherited Destroy;" <<
+        std::endl      << "end;"  <<
+        std::endl      <<
+        std::endl      << "constructor " << *$2 << ".Create;" <<
+        std::endl      << "begin" <<
+        std::endl      << get_indent() << "inherited Create;" <<
+        std::endl      ;
+        delete $2;
+    }   class_list_opt CMD_ENDCLASS {
+        indent--;
+        term_stream[2] << get_indent() << "end;" <<
+        std::endl ;
+    }
+    ;
+
+form_optional
+    :   '(' CMD_ID ')' {
+        $$ = new std::string(*$2);
+        delete $2;
+    }
+    |   /* empty */ {
+        $$ = nullptr;
+    }
+    ;
+    
+class_list_opt
+    :   class_list
+    |   /* empty */
+    ;
+    
+with_statement
+    :   CMD_WITH '(' qualified_access ')' {
+        std::string* input = new std::string(*$3);
+        std::string  extracted;
+        if (parseThis(*input, extracted)) {
+            term_stream[2] << get_indent() << "with (" << extracted << ") do" <<
+            std::endl      << get_indent() << "begin"                         <<
+            std::endl;
+            delete $3;
+            delete input;
+            indent++;
+        }   else {
+            yyerror("unknow command.");
         }
-    }
-    | local_list ',' {
-        if (is_header) {
-            str_localscope.append(", ");
-        }
-    } local_list
-    ;
-
-parameter_list
-    : id {
-        if (is_header) {
-            str_header_name.append($1);
-            str_header.append($1);
-        }
-    }
-    | parameter_list ',' {
-        if (is_header) {
-            str_header_name.append(", ");
-            str_header.append(", ");
-        }
-    } parameter_list
-    ;
-
-class_body
-    : class_stmt class_body
-    | /* empty */
-    ;
-class_stmt
-    : CMD_PRIVATE { emit_code(std::string("\tprivate\n")); }
-    | CMD_LOCAL   {
-        if (is_inclass) {
-            emit_code("\tpublic\n" );
-            emit_code("\t\tconstructor Create;\n");
-            emit_code("\t\tdestructor  Destroy;\n");
-
-            str_constructor.clear();
-            str_constructor.append("construtor ");
-            str_constructor.append(str_classname);
-            str_constructor.append(".Create;\nbegin\n\tinherited;\n");
-
-            str_destructor .clear();
-            str_destructor .append("destructor ");
-            str_destructor .append(str_classname);
-            str_destructor .append(".Destroy;\nbegin\n\tinherited;\n");
-        }
+        std::cout << "qualo" << std::endl;
+    }   with_block { std::cout << "uuuuu" << std::endl; } CMD_ENDWITH {
+        indent--;
+        term_stream[2] << get_indent() << "end;" << std::endl;
     }
     ;
 
-id  : CMD_ID { $$ = $1; }
+with_block
+    :   with_block with_element
+    |   with_element
+    ;
+
+with_element
+    :   with_statement
+    |   assignment
+    |   /* empty */
+    ;
+
+qualified_id
+    :   CMD_ID {
+        $$ = $1;
+    }
+    |   qualified_id '.' CMD_ID {
+        $$ = new std::string(*$1 + "." + *$3);
+        delete $1;
+        delete $3;
+    }
+    ;
+
+qualified_access
+    :   CMD_ID { std::cout << "----->> " << *$1 << std::endl; } access_tail {
+    std::cout << "=>>> " << *$3 << " <<<-- " << std::endl;
+        *$1 += *$3;
+        $$ = $1;
+        delete $3;
+    }
+    ;
+
+access_tail
+    :   '.' CMD_ID access_tail {
+        $$ = new std::string("." + *$2 + *$3);
+        delete $2;
+        delete $3;
+    }
+    |   '(' ')' access_tail {
+        $$ = new std::string("()" + *$3);
+        delete $3;
+    }
+    |   '(' expr_list ')' access_tail {
+        $$ = new std::string("(" + *$2 + ")" + *$4);
+        delete $2;
+        delete $4;
+    }
+    |   '[' expr ']' access_tail {
+        $$ = new std::string("[" + *$2 + "]" + *$4);
+        delete $2;
+        delete $4;
+    }
+    |   /* empty */ {
+        $$ = new std::string("");
+    }
+    ;
+
+expr_list
+    :   expr {
+        $$ = new std::string(*$1);
+        delete $1;
+    }
+    |   expr ',' expr_list {
+        $$ = new std::string(*$1 + ", " + *$3);
+        delete $1;
+        delete $3;
+    }
+    ;
+
+assignment
+    :   qualified_access { std::cout << "oooooooo" << std::endl; } CMD_ASSIGN value {
+        term_stream[2] << get_indent() << *$1 << " = " << *$4 << std::endl;
+        delete $1;
+        delete $4;
+    }
+    |   CMD_ID CMD_ASSIGN expr_string {
+        term_stream[0] << get_indent() << *$1 << " = \"" << *$3 << "\"" << std::endl;
+        delete $1;
+        delete $3;
+    }
+    ;
+
+path_tail
+    :   '.' CMD_ID path_tail {
+        $$ = new std::string("." + *$2 + *$3);
+        delete $2;
+        delete $3;
+    }
+    |   /* empty */ {
+        $$ = new std::string("");
+    }
+    ;
+    
+class_command
+    :   CMD_CLASS CMD_ID CMD_OF CMD_ID {
+        class_vector.push_back(*$2);
+    }   class_cmds
+        CMD_ENDCLASS {
+        if (!class_vector.empty()) {
+            std::stringstream names;
+            std::stringstream  guid;
+            
+            names << "TDBClass_";
+            
+            for (const std::string& s : class_vector)
+            names << s << "_";
+            
+            std::string last = class_vector.back();
+            class_vector.pop_back();
+            
+            guid << "TDBClass_" << GenerateGUID();
+            
+            classes_guid.emplace( guid.str(), names.str() );
+            classes     .emplace( guid.str(), *$4 );
+        }
+    }   class_command
+    |   /* empty */
+    ;
+
+class_cmds
+    :   class_command
+    |   /* empty */
     ;
 
 %%
 //-- FUNCTION DEFINITIONS ---------------------------------
-
-int main(int argc, char **argv)
+// --------------------------------------------------------
+// CLEAN UP FUNCTION WHEN APPLICATION "EXIT" ...
+// --------------------------------------------------------
+void finish()
 {
-    int result = 0;
-    register int is_stdin = 0;
-
-    printf("dbase2delphi (c) 2019 Jens Kallup\n");
-    printf("all rights reserved.\n\n");
-
-    if (argc  < 2) {
-        argc += 1;
-        argv[1] = (char*) malloc(128);
-        strcpy(argv[1],"/dev/stdin");
-        is_stdin = 1;
-    }
-
-    if (!(yyin = fopen(argv[1],"r"))) {
-        fprintf(stderr,"error: can't find input file, use default stdin.\n");
-        yyset_in(stdin);
-    }   yyset_in(yyin);
-
-    char *output = (char *) malloc(strlen(argv[1])+5);
-    strcpy(output,argv[1]);
-    strcat(output,".pas");
-
-    FILE *tout = nullptr;
-    if (!(tout = fopen(output,"w"))) {
-        fprintf(stderr,"error: can't open file to write, try stdout.\n");
-        FILE *tmpout = nullptr;
-        if (!(tmpout = fopen("/dev/stdout","w"))) {
-            free(output);
-            fprintf(stderr,"ERROR\n");
-            fclose(yyin);
-            return 1;
-        }   else {
-            yyset_out(tmpout);
-            goto nextstep;
-        }
-        free(output);
-        return 1;
-    }   else {
-        if (tout == stdout) {
-            yyset_out(stdout); goto nextstep;
-        }   yyset_out(tout);
-    }
-
-nextstep:
-    free(output);
-
-    if (!is_stdin) {
-        input_file = (char *) malloc(strlen(argv[1])); strcpy(input_file,argv[1]);
-        input_file[strlen(input_file) - 4]  = '\0';
-    }   else {
-        input_file = (char *) malloc(128);
-        strcpy(input_file,"untitled");
-    }
-
-    std::string str = "unit ";
-    str.append(input_file);
-    str.append(";\n\ninterface\n\n");
-    str.append("uses\n\tSysUtils, Classes, Controls, Forms,\n\tDialogs, dBase7;\n\n");
-    emit_code(str);
-
-    result = yyparse();
-
-    std::string cv;
-    for (std::map<std::string,std::string>::iterator classIter = classVariable.begin();
-        classIter != classVariable.end();
-        ++classIter) {
-        cv.clear();
-        cv.append("var\n\t");
-        cv.append(classIter->first );
-        cv.append(classIter->second); cv.append("\n");
-        emit_code(cv);
-    }
-
-    emit_code(str_header_name);
-
-    std::string impl = "\nimplementation\n\n";
-    emit_code(impl);
-
-    if (is_header) {
-        emit_code(str_localscope);          // local
-        str_header.append(str_localnew);
-        str_header.append("end;\n\n");
-        emit_code(str_header);
-    }
-
-    str_constructor.append("\n");
-    emit_code(str_constructor);
-
-    str_destructor.append("\n");
-    emit_code(str_destructor);
-
-    if (result < 1) {
-        fprintf(yyout,"end.");
-        fprintf(stdout,"SUCCESS\n");
-    } else {
-        fprintf(stdout,"ERROR\n");
-    }
-
-    free(input_file);
     fclose(yyin);
     fclose(yyout);
-    return result;
+}
+
+// --------------------------------------------------------
+// FUNCTION TO CONVERT LOWERCASE CHARS TO UPPER CASE
+// --------------------------------------------------------
+std::string UpperCase(const std::string& input) {
+    std::string res = input;
+    std::transform(res.begin(), res.end(),
+        res.begin(), [](unsigned char c) {
+        return std::toupper(c);
+    });
+    return res;
+}
+
+// --------------------------------------------------------
+// REPEAT std::string N-TIMES
+// --------------------------------------------------------
+std::string repeat(const std::string& str, int n) {
+    std::string res;
+    res.reserve(str.size() * n);
+    for (int i = 0; i < n; ++i)
+        res += str;
+    return res;
+}
+
+// --------------------------------------------------------
+// ENTRY POINT OF OUR COMPILER
+// --------------------------------------------------------
+int main(int argc, char **argv)
+{
+    //int8_t result  = 0;
+    int8_t is_open = 0;
+
+    std::cout << "dbase2delphi (c) 2025 Jens Kallup" <<
+    std::endl << "all rights reserved." <<
+    std::endl <<
+    std::endl ;
+
+    if (atexit(finish) != 0) {
+        std::cerr << "Error: could not set exit routine." <<
+        std::endl ;
+        return 1;
+    }
+    
+    if (argc > 0) {
+        if (!(yyin = fopen(argv[1], "r"))) {
+            std::cerr << "Error: can't find input file, use stdin." <<
+            std::endl  ;
+            is_open = 1;
+            yyset_in  ( stdin  );
+            yyset_out ( stdout );
+        }   else {
+            yyset_in  ( yyin );
+        }
+
+        if (!is_open) {
+            std::stringstream ss;
+            ss << argv[1] << ".pas";
+    
+            if (!(yyout = fopen(ss.str().c_str(), "w"))) {
+                std::cerr << "Error: can't open output file, use stdout." <<
+                std::endl ;
+                yyset_out ( stdout );
+            }
+        }
+    }   else {
+        yyset_in (stdin);
+        yyset_out(stdout);
+    }
+
+    std::string extension;
+    std::string offext;
+    
+    if (argc > 0) {
+        std::string filename = strdup(argv[1]);
+        size_t pos = filename.rfind('.');
+    
+        if (pos != std::string::npos)
+        {
+            extension = filename.substr(pos + 1);
+            offext = filename.substr(0, pos);
+        
+            if (extension != "prg") {
+                std::cerr << "Error: file extension not .pas" <<
+                std::endl ;
+                exit(1);
+            }
+        }   else {
+            std::cerr << "Error: could not found extension." <<
+            std::endl ;
+            exit(1);
+        }
+    }   else {
+        std::cerr << "TODO: stdout" <<
+        std::endl ;
+        exit(1);
+    }
+
+    std::stringstream str;
+    str << "// " << std::string(77, '-') << std::endl
+        << "// Copyright(c) 2025 Jens Kallup"                   << std::endl
+        << "// all rights reserved."                            << std::endl
+        << "//"                                                 << std::endl
+        << "// ATTENTION:"                                      << std::endl
+        << "// This file was automaticaly created from: "       << std::endl
+        << "// All changes will be lost on next convert run !"  << std::endl
+        << "// " << std::string(77, '-') << std::endl
+        
+        << "{$mode delphi}"       << std::endl
+        << "UNIT "   << offext    << ";"
+        << std::endl << std::endl << "INTERFACE"
+        << std::endl << std::endl << "USES"
+        << std::endl << "  "      << "Interfaces, SysUtils, Classes, Forms, Dialogs;"
+        << std::endl << std::endl;
+    /*
+    str << "TYPE"
+        << std::endl << "  TParamScope = ("
+        << std::endl << std::string(4, ' ') << "PS_UNKNOWN   = 0,"
+        << std::endl << std::string(4, ' ') << "PS_LOCAL     = 1,"
+        << std::endl << std::string(4, ' ') << "PS_GLOBAL    = 2,"
+        << std::endl << std::string(4, ' ') << "PS_PRIVATE   = 3,"
+        << std::endl << std::string(4, ' ') << "PS_PROTECTED = 4"
+        << std::endl << "  );"
+        << std::endl
+        << "  TParamType = ("
+        << std::endl << std::string(4, ' ') << "PT_UNKNOWN = 0,"
+        << std::endl << std::string(4, ' ') << "PT_NUMERIC = 1,"
+        << std::endl << std::string(4, ' ') << "PT_STRING  = 2,"
+        << std::endl << std::string(4, ' ') << "PT_OBJECT  = 3"
+        "  );"
+        << std::endl
+        << std::endl
+        ;
+        
+    str << "TYPE"    << std::endl
+        << "  TDBParameterClass = CLASS(TObject)" << std::endl
+        << "  public"
+        << std::endl
+        << std::string(4, ' ') << "pName  : String      ;" << std::endl
+        << std::string(4, ' ') << "pScope : TParamScope ;" << std::endl
+        << std::string(4, ' ') << "pType  : TParamType  ;" << std::endl
+        << std::string(4, ' ') << "pSize  : Integer     ;" << std::endl
+        << std::string(4, ' ') << "pData  : PChar       ;" << std::endl
+        << "  END;"
+        << std::endl << std::endl;*/
+
+    term_stream[4] << "procedure Main(Args: array of String);" << std::endl;
+    term_stream[3] << "procedure Main(Args: array of String);" <<
+    std::endl      << "begin" <<
+    std::endl      ;
+    
+    indent++;
+    
+    scope_level = 0;
+    yyparse();
+    
+    std::cout << str.str();
+    std::cout << term_stream[1].str() << std::endl;
+    std::cout << term_stream[0].str() << std::endl;
+    std::cout << term_stream[4].str() << std::endl;
+    
+    std::cout << "implementation"     << std::endl;
+    
+    std::cout << term_stream[2].str() << std::endl;
+    std::cout << term_stream[3].str() ;
+    
+    std::cout << "end;" <<
+    std::endl <<
+    std::endl << "end." <<
+    std::endl <<
+    std::endl ;
+        
+    if (indent < 1)
+        term_stream[0] << get_indent() << "end;" <<
+        std::endl;
+    
+    if (result) {
+        std::cout << "SUCCESS" <<
+        std::endl ;
+        
+        fprintf(yyout, "%s", str.str().c_str());
+    } else {
+        std::cout << "ERROR" <<
+        std::endl ;
+        exit(1);
+    }
+
+    return 0;
 }
